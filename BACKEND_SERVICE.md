@@ -315,7 +315,7 @@ See `backend/migrations/001_initial_schema.sql` for full schema.
 ```bash
 DATABASE_URL=postgresql://localhost/collateral_vault
 RPC_URL=https://api.devnet.solana.com
-PROGRAM_ID=Fwfy9VwuzRqhQoCh4pk9JJ3dpBdTipUMPLVByCLWp6hf
+PROGRAM_ID=8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9
 USDT_MINT=Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB
 PORT=3000
 ```

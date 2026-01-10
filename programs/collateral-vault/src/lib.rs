@@ -2,7 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_spl::associated_token::AssociatedToken;
 
-declare_id!("Fwfy9VwuzRqhQoCh4pk9JJ3dpBdTipUMPLVByCLWp6hf");
+declare_id!("8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9");
 
 #[program]
 pub mod collateral_vault {

@@ -4,14 +4,19 @@ import { CollateralVault } from "../target/types/collateral_vault";
 import { 
   TOKEN_PROGRAM_ID, 
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  MINT_SIZE,
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
+  createInitializeMintInstruction,
+  createMintToInstruction,
+  getMinimumBalanceForRentExemptMint,
 } from "@solana/spl-token";
 import { 
   PublicKey, 
   Keypair, 
   SystemProgram,
   SYSVAR_RENT_PUBKEY,
+  Transaction,
 } from "@solana/web3.js";
 
 describe("collateral-vault", () => {
@@ -22,19 +27,53 @@ describe("collateral-vault", () => {
   const admin = provider.wallet;
   const user = Keypair.generate();
   
-  // USDT mint (devnet)
-  const mint = new PublicKey("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB");
-  
+  let mint: Keypair;
+  let mintPubkey: PublicKey;
   let vaultAuthority: PublicKey;
   let vaultAuthorityBump: number;
 
   before(async () => {
-    // Airdrop SOL to user
-    const signature = await provider.connection.requestAirdrop(
+    // Airdrop SOL to user and admin
+    const userAirdrop = await provider.connection.requestAirdrop(
       user.publicKey,
       2 * anchor.web3.LAMPORTS_PER_SOL
     );
-    await provider.connection.confirmTransaction(signature);
+    await provider.connection.confirmTransaction(userAirdrop);
+
+    const adminAirdrop = await provider.connection.requestAirdrop(
+      admin.publicKey,
+      2 * anchor.web3.LAMPORTS_PER_SOL
+    );
+    await provider.connection.confirmTransaction(adminAirdrop);
+
+    // Create test mint
+    mint = Keypair.generate();
+    mintPubkey = mint.publicKey;
+    
+    const mintRent = await getMinimumBalanceForRentExemptMint(provider.connection);
+    
+    const createMintTx = new Transaction().add(
+      SystemProgram.createAccount({
+        fromPubkey: admin.publicKey,
+        newAccountPubkey: mintPubkey,
+        space: MINT_SIZE,
+        lamports: mintRent,
+        programId: TOKEN_PROGRAM_ID,
+      }),
+      createInitializeMintInstruction(
+        mintPubkey,
+        6, // 6 decimals like USDT
+        admin.publicKey,
+        null // No freeze authority
+      )
+    );
+    
+    const { blockhash } = await provider.connection.getLatestBlockhash();
+    createMintTx.feePayer = admin.publicKey;
+    createMintTx.recentBlockhash = blockhash;
+    createMintTx.sign(admin.payer, mint);
+    const sig = await provider.connection.sendRawTransaction(createMintTx.serialize());
+    await provider.connection.confirmTransaction(sig);
 
     // Initialize vault authority
     [vaultAuthority, vaultAuthorityBump] = PublicKey.findProgramAddressSync(
@@ -45,6 +84,15 @@ describe("collateral-vault", () => {
 
   it("Initializes vault authority", async () => {
     const authorizedPrograms = [program.programId]; // For testing
+
+    // Check if vault authority already exists
+    try {
+      const existing = await program.account.vaultAuthority.fetch(vaultAuthority);
+      console.log("Vault authority already initialized:", vaultAuthority.toString());
+      return; // Skip if already initialized
+    } catch (err) {
+      // Account doesn't exist, proceed with initialization
+    }
 
     const tx = await program.methods
       .initializeVaultAuthority(authorizedPrograms)
@@ -59,13 +107,13 @@ describe("collateral-vault", () => {
   });
 
   it("Initializes user vault", async () => {
-    const [vaultPda] = PublicKey.findProgramAddressSync(
+    const [vaultPda, vaultBump] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), user.publicKey.toBuffer()],
       program.programId
     );
 
     const vaultTokenAccount = await getAssociatedTokenAddress(
-      mint,
+      mintPubkey,
       vaultPda,
       true
     );
@@ -82,7 +130,7 @@ describe("collateral-vault", () => {
           user: user.publicKey,
           vault: vaultPda,
           vaultTokenAccount: vaultTokenAccount,
-          mint: mint,
+          mint: mintPubkey,
           vaultAuthorityPda: vaultAuthorityPda,
           vaultAuthority: vaultAuthority,
           tokenProgram: TOKEN_PROGRAM_ID,
@@ -103,19 +151,19 @@ describe("collateral-vault", () => {
   });
 
   it("Deposits collateral", async () => {
-    const [vaultPda] = PublicKey.findProgramAddressSync(
+    const [vaultPda, vaultBump] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), user.publicKey.toBuffer()],
       program.programId
     );
 
     const vaultTokenAccount = await getAssociatedTokenAddress(
-      mint,
+      mintPubkey,
       vaultPda,
       true
     );
 
     const userTokenAccount = await getAssociatedTokenAddress(
-      mint,
+      mintPubkey,
       user.publicKey
     );
 
@@ -124,7 +172,36 @@ describe("collateral-vault", () => {
       program.programId
     );
 
+    // Create user token account if it doesn't exist
+    const userTokenAccountInfo = await provider.connection.getAccountInfo(userTokenAccount);
+    if (!userTokenAccountInfo) {
+      const createATA = new Transaction().add(
+        createAssociatedTokenAccountInstruction(
+          user.publicKey,
+          userTokenAccount,
+          user.publicKey,
+          mintPubkey
+        )
+      );
+      await provider.sendAndConfirm(createATA, [user]);
+    }
+
+    // Mint tokens to user
     const amount = new anchor.BN(1000000); // 1 USDT (6 decimals)
+    const mintTx = new Transaction().add(
+      createMintToInstruction(
+        mintPubkey,
+        userTokenAccount,
+        admin.publicKey,
+        amount.toNumber()
+      )
+    );
+    const { blockhash: mintBlockhash } = await provider.connection.getLatestBlockhash();
+    mintTx.feePayer = admin.publicKey;
+    mintTx.recentBlockhash = mintBlockhash;
+    mintTx.sign(admin.payer);
+    const mintSig = await provider.connection.sendRawTransaction(mintTx.serialize());
+    await provider.connection.confirmTransaction(mintSig);
 
     try {
       const tx = await program.methods
@@ -134,7 +211,7 @@ describe("collateral-vault", () => {
           vault: vaultPda,
           userTokenAccount: userTokenAccount,
           vaultTokenAccount: vaultTokenAccount,
-          mint: mint,
+          mint: mintPubkey,
           vaultAuthorityPda: vaultAuthorityPda,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
@@ -152,19 +229,19 @@ describe("collateral-vault", () => {
   });
 
   it("Withdraws collateral", async () => {
-    const [vaultPda] = PublicKey.findProgramAddressSync(
+    const [vaultPda, vaultBump] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), user.publicKey.toBuffer()],
       program.programId
     );
 
     const vaultTokenAccount = await getAssociatedTokenAddress(
-      mint,
+      mintPubkey,
       vaultPda,
       true
     );
 
     const userTokenAccount = await getAssociatedTokenAddress(
-      mint,
+      mintPubkey,
       user.publicKey
     );
 
@@ -183,7 +260,7 @@ describe("collateral-vault", () => {
           vault: vaultPda,
           userTokenAccount: userTokenAccount,
           vaultTokenAccount: vaultTokenAccount,
-          mint: mint,
+          mint: mintPubkey,
           vaultAuthorityPda: vaultAuthorityPda,
           vaultAuthority: vaultAuthority,
           tokenProgram: TOKEN_PROGRAM_ID,

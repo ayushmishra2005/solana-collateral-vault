@@ -83,7 +83,7 @@ Create a `.env` file in the root directory:
 ```bash
 DATABASE_URL=postgresql://localhost/collateral_vault
 RPC_URL=https://api.devnet.solana.com
-PROGRAM_ID=Fwfy9VwuzRqhQoCh4pk9JJ3dpBdTipUMPLVByCLWp6hf
+PROGRAM_ID=8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9
 USDT_MINT=Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB
 PORT=3000
 ```
@@ -271,61 +271,4 @@ See [API.md](./API.md) for detailed API documentation.
 - [SECURITY.md](./SECURITY.md) - Security analysis and best practices
 - [DEPLOYMENT.md](./DEPLOYMENT.md) - Production deployment guide
 - [API.md](./API.md) - REST API documentation
-
-## Troubleshooting
-
-### Program Build Fails
-
-```bash
-# Update Anchor
-avm install latest
-avm use latest
-
-# Clean and rebuild
-anchor clean
-anchor build
-```
-
-### Database Connection Issues
-
-```bash
-# Check PostgreSQL is running
-sudo systemctl status postgresql
-
-# Verify connection
-psql -U postgres -d collateral_vault
-```
-
-### Transaction Failures
-
-- Ensure you have sufficient SOL for transaction fees
-- Check RPC endpoint is accessible
-- Verify account addresses are correct
-- Check compute unit limits
-
-### Backend Won't Start
-
-- Verify `.env` file exists with correct values
-- Check database is running and accessible
-- Ensure port 3000 is not in use
-- Check logs for specific error messages
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## License
-
-This project is part of a technical assessment for GoQuant.
-
-## Support
-
-For issues or questions:
-- Check the documentation files
-- Review logs for error messages
-- Open an issue on the repository
 
