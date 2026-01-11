@@ -8,7 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
-    signature::Keypair,
+    signature::{Keypair, Signer},
     transaction::Transaction,
 };
 use spl_associated_token_account::get_associated_token_address;
@@ -63,7 +63,7 @@ impl VaultManager {
                         .unwrap_or_else(|_| std::fs::read(&keypair_path).unwrap_or_default());
                     
                     if keypair_bytes.len() == 64 {
-                        Arc::new(Keypair::from_bytes(&keypair_bytes).unwrap_or_else(|_| Keypair::new()))
+                        Arc::new(Keypair::try_from(&keypair_bytes[..]).unwrap_or_else(|_| Keypair::new()))
                     } else {
                         Arc::new(Keypair::new())
                     }

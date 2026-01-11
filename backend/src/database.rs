@@ -2,7 +2,6 @@ use sqlx::PgPool;
 use chrono::Utc;
 use crate::models::{TransactionRecord, TransactionType, BalanceSnapshot};
 use crate::error::Result;
-use std::str::FromStr;
 
 pub struct Database {
     pool: PgPool,
