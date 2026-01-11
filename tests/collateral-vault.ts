@@ -144,6 +144,13 @@ describe("collateral-vault", () => {
 
       const vaultAccount = await program.account.collateralVault.fetch(vaultPda);
       console.log("Vault account:", vaultAccount);
+      
+      // Verify vault was initialized correctly
+      const chai = require("chai");
+      chai.assert.equal(vaultAccount.owner.toString(), user.publicKey.toString(), "Owner should match user");
+      chai.assert.equal(vaultAccount.totalBalance.toNumber(), 0, "Initial balance should be 0");
+      chai.assert.equal(vaultAccount.lockedBalance.toNumber(), 0, "Initial locked balance should be 0");
+      chai.assert.equal(vaultAccount.availableBalance.toNumber(), 0, "Initial available balance should be 0");
     } catch (err) {
       console.error("Error initializing vault:", err);
       throw err;
@@ -222,6 +229,12 @@ describe("collateral-vault", () => {
 
       const vaultAccount = await program.account.collateralVault.fetch(vaultPda);
       console.log("Vault after deposit:", vaultAccount);
+      
+      // Verify deposit was successful
+      const chai = require("chai");
+      chai.assert.equal(vaultAccount.totalBalance.toNumber(), 1000000, "Total balance should be 1000000");
+      chai.assert.equal(vaultAccount.availableBalance.toNumber(), 1000000, "Available balance should be 1000000");
+      chai.assert.equal(vaultAccount.totalDeposited.toNumber(), 1000000, "Total deposited should be 1000000");
     } catch (err) {
       console.error("Error depositing:", err);
       throw err;
@@ -272,6 +285,12 @@ describe("collateral-vault", () => {
 
       const vaultAccount = await program.account.collateralVault.fetch(vaultPda);
       console.log("Vault after withdraw:", vaultAccount);
+      
+      // Verify withdraw was successful
+      const chai = require("chai");
+      chai.assert.equal(vaultAccount.totalBalance.toNumber(), 500000, "Total balance should be 500000 after withdraw");
+      chai.assert.equal(vaultAccount.availableBalance.toNumber(), 500000, "Available balance should be 500000");
+      chai.assert.equal(vaultAccount.totalWithdrawn.toNumber(), 500000, "Total withdrawn should be 500000");
     } catch (err) {
       console.error("Error withdrawing:", err);
       throw err;

@@ -130,7 +130,140 @@ cargo run --release
 
 The server will start on `http://localhost:3000`
 
-## Testing
+## Complete Testing Guide (From Scratch)
+
+### Step 1: Start Local Solana Validator
+
+Open Terminal 1:
+```bash
+solana-test-validator
+```
+
+Keep this running. In a new terminal, configure Solana for localnet:
+```bash
+solana config set --url localhost
+```
+
+### Step 2: Create Test Token
+
+In the same terminal:
+```bash
+spl-token create-token --decimals 6
+```
+
+**Important**: Note the mint address output (e.g., `EM8thaMRrQ6cYK7zzVjzw9wwcL4RJcFn7QesJhr8UkY3`). You'll need this for the `USDT_MINT` environment variable.
+
+### Step 3: Setup Database
+
+```bash
+# Create database
+createdb collateral_vault
+
+# Run migrations
+psql collateral_vault < backend/migrations/001_initial_schema.sql
+```
+
+### Step 4: Build and Deploy Program
+
+```bash
+# Build the Anchor program
+anchor build
+
+# Deploy to local validator
+anchor deploy
+```
+
+### Step 5: Get Your Wallet Address
+
+```bash
+solana address
+```
+
+**Important**: For local testing, you must use the same wallet that's running the backend server (the default Solana wallet at `~/.config/solana/id.json`). This is because the backend signs transactions with this wallet. In production, users would sign their own transactions.
+
+### Step 6: Mint Tokens to Your Wallet
+
+```bash
+# Create associated token account (replace MINT_ADDRESS with your mint from Step 2)
+spl-token create-account <MINT_ADDRESS>
+
+# Mint tokens (10,000 tokens with 6 decimals = 10000000000 in smallest units)
+spl-token mint <MINT_ADDRESS> 10000
+```
+
+### Step 7: Start Backend Server
+
+Open Terminal 2:
+```bash
+cd backend
+
+# Set environment variables (replace MINT_ADDRESS with your mint from Step 2)
+export DATABASE_URL=postgresql://localhost/collateral_vault
+export RPC_URL=http://localhost:8899
+export PROGRAM_ID=8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9
+export USDT_MINT=<MINT_ADDRESS>
+
+# Start the server
+cargo run
+```
+
+The server will start on `http://localhost:3000`. Keep this running.
+
+### Step 8: Test All APIs
+
+Open Terminal 3. Replace `YOUR_PUBKEY` with your wallet address from Step 5:
+
+```bash
+# Set your pubkey
+YOUR_PUBKEY="<your_pubkey_from_step_5>"
+
+# 1. Initialize Vault
+curl -X POST http://localhost:3000/vault/initialize \
+  -H "Content-Type: application/json" \
+  -d "{\"user\": \"$YOUR_PUBKEY\"}"
+
+# 2. Get Vault Balance
+curl http://localhost:3000/vault/balance/$YOUR_PUBKEY
+
+# 3. Deposit Tokens (1000 tokens = 1000000000 with 6 decimals)
+curl -X POST http://localhost:3000/vault/deposit \
+  -H "Content-Type: application/json" \
+  -d "{\"user\": \"$YOUR_PUBKEY\", \"amount\": 1000000000}"
+
+# 4. Get Balance After Deposit
+curl http://localhost:3000/vault/balance/$YOUR_PUBKEY
+
+# 5. Withdraw Tokens (500 tokens = 500000000 with 6 decimals)
+curl -X POST http://localhost:3000/vault/withdraw \
+  -H "Content-Type: application/json" \
+  -d "{\"user\": \"$YOUR_PUBKEY\", \"amount\": 500000000}"
+
+# 6. Get Balance After Withdraw
+curl http://localhost:3000/vault/balance/$YOUR_PUBKEY
+
+# 7. Get Transaction History
+curl http://localhost:3000/vault/transactions/$YOUR_PUBKEY
+
+# 8. Get Total Value Locked (TVL)
+curl http://localhost:3000/vault/tvl
+```
+
+**Alternative**: You can use the provided test script:
+```bash
+# Set your pubkey as environment variable
+export ADMIN_PUBKEY="<your_pubkey>"
+
+# Run all API tests
+./test-all-apis.sh
+```
+
+### Expected Results
+
+- **Initialize**: Returns `{"success": true, "signature": "..."}`
+- **Balance**: Returns vault info with balances (initially 0, then updated after deposits/withdrawals)
+- **Deposit/Withdraw**: Returns transaction signature
+- **Transactions**: Returns array of all transactions for the vault
+- **TVL**: Returns total value locked across all vaults
 
 ### Test the Anchor Program
 
@@ -138,59 +271,12 @@ The server will start on `http://localhost:3000`
 # Run all tests
 anchor test
 
-# Run with local validator
+# Run with local validator (skip starting validator)
 anchor test --skip-local-validator
 
 # Run specific test file
 anchor test tests/collateral-vault.ts
 ```
-
-### Test the Backend API
-
-```bash
-# Start the backend server first
-cd backend
-cargo run
-
-# In another terminal, test endpoints
-curl http://localhost:3000/vault/tvl
-
-# Initialize a vault (replace with your pubkey)
-curl -X POST http://localhost:3000/vault/initialize \
-  -H "Content-Type: application/json" \
-  -d '{"user": "YOUR_PUBKEY_HERE"}'
-
-# Get vault balance
-curl http://localhost:3000/vault/balance/YOUR_PUBKEY_HERE
-```
-
-### Manual Testing Flow
-
-1. **Initialize Vault**
-   ```bash
-   curl -X POST http://localhost:3000/vault/initialize \
-     -H "Content-Type: application/json" \
-     -d '{"user": "YOUR_PUBKEY"}'
-   ```
-
-2. **Deposit Collateral**
-   ```bash
-   curl -X POST http://localhost:3000/vault/deposit \
-     -H "Content-Type: application/json" \
-     -d '{"user": "YOUR_PUBKEY", "amount": 1000000}'
-   ```
-
-3. **Check Balance**
-   ```bash
-   curl http://localhost:3000/vault/balance/YOUR_PUBKEY
-   ```
-
-4. **Withdraw Collateral**
-   ```bash
-   curl -X POST http://localhost:3000/vault/withdraw \
-     -H "Content-Type: application/json" \
-     -d '{"user": "YOUR_PUBKEY", "amount": 500000}'
-   ```
 
 ## Development
 
@@ -251,6 +337,24 @@ Rust service providing:
 - Balance tracking and reconciliation
 - TVL monitoring
 
+**Backend File Structure:**
+
+- `main.rs` - Entry point, sets up database connection, Solana client, and starts the HTTP server
+- `api.rs` - Defines all REST API endpoints (initialize, deposit, withdraw, balance, transactions, TVL)
+- `vault_manager.rs` - Core vault operations: interacts with Solana blockchain, builds transactions, fetches on-chain data
+- `transaction_builder.rs` - Builds Solana instructions for initialize, deposit, and withdraw operations
+- `database.rs` - PostgreSQL operations: stores transactions, calculates TVL from transaction history
+- `vault_monitor.rs` - Monitors vaults and calculates TVL (used by TVL endpoint)
+- `models.rs` - Data structures for API requests/responses and database records
+- `error.rs` - Custom error types for the backend
+- `balance_tracker.rs` - Placeholder for future balance tracking and reconciliation features
+- `cpi_manager.rs` - Placeholder for future Cross-Program Invocation (CPI) management features
+- `websocket.rs` - Placeholder for future WebSocket real-time event streaming
+
+**Required Files for Testing:**
+- All files in `backend/src/` are needed to run the application
+- `backend/migrations/001_initial_schema.sql` is required for database setup
+
 ## API Endpoints
 
 - `POST /vault/initialize` - Create new vault
@@ -261,6 +365,27 @@ Rust service providing:
 - `GET /vault/tvl` - Get total value locked
 
 See [API.md](./API.md) for detailed API documentation.
+
+## Important Notes
+
+### Local Testing Limitation
+
+For local testing, the user pubkey in API requests must match the admin wallet (the wallet used to run the backend server, located at `~/.config/solana/id.json`). This is because the backend signs transactions with this wallet. In production, users would sign their own transactions using their wallets.
+
+### Environment Variables
+
+The backend requires these environment variables:
+- `DATABASE_URL` - PostgreSQL connection string (default: `postgresql://localhost/collateral_vault`)
+- `RPC_URL` - Solana RPC endpoint (default: `http://localhost:8899` for local, or `https://api.devnet.solana.com` for devnet)
+- `PROGRAM_ID` - Your deployed program ID (default: `8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9`)
+- `USDT_MINT` - SPL token mint address for collateral (required - no default for local testing)
+
+### No Hardcoded Values
+
+The system does not use hardcoded wallet addresses or pubkeys. All values are:
+- Loaded from environment variables
+- Read from the default Solana wallet (`~/.config/solana/id.json`)
+- Provided by the user via API requests
 
 ## Documentation
 
