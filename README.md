@@ -1,399 +1,263 @@
 # Collateral Vault Management System
 
-A decentralized collateral vault management system for perpetual futures exchanges on Solana. This system securely manages user collateral (USDT) in program-controlled vaults, enabling non-custodial trading operations.
+A Solana collateral vault for perpetual trading workflows.
 
-## Features
+Program ID: `8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9`
 
-- **PDA-based Vaults**: Each user has an isolated vault account derived from their public key
-- **Secure Collateral Management**: Deposit, withdraw, lock, and unlock collateral with proper access controls
-- **Cross-Program Invocations**: Position management programs can lock/unlock collateral via CPI
-- **Real-time Monitoring**: Backend service tracks balances, TVL, and transaction history
-- **REST API**: HTTP endpoints for vault operations
-- **WebSocket Support**: Real-time event streaming for balance updates
-- **PostgreSQL Integration**: Transaction history and balance snapshots
+## What it does
 
-## Project Structure
+Each user has a vault PDA and an associated SPL token account.
+
+### Implemented
+
+- Deposit collateral
+- Withdraw available collateral
+- Lock collateral for positions
+- Unlock collateral
+- Transfer collateral between vaults
+- Allowlist of programs that may lock, unlock, or transfer through CPI
+- Rust backend with a REST API
+- PostgreSQL storage for transaction history
+
+### Not implemented / planned
+
+- WebSocket streaming (`backend/src/websocket.rs` is unused)
+- Balance reconciliation (`backend/src/balance_tracker.rs` is a stub)
+- Backend CPI helpers (`backend/src/cpi_manager.rs` returns placeholder signatures)
+- Background vault monitoring (`VaultMonitor::monitor_vaults` is an empty loop)
+- API authentication
+- Rate limiting
+- Changing the authorized program list after init
+- Crediting or recovering tokens sent directly to a vault token account
+
+TVL is computed from recorded deposit and withdrawal rows. `GET /vault/tvl` currently reports `total_vaults` as `0`.
+
+## Architecture
+
+- **Anchor program** (`programs/collateral-vault`): on-chain vault state and token moves
+- **Vault PDA**: `["vault", user_pubkey]`
+- **SPL token account**: ATA owned by the vault PDA
+- **VaultAuthority**: singleton PDA `["vault_authority"]` with `admin` and `authorized_programs`
+- **Authorized calling programs**: listed at VaultAuthority init
+- **CPI authority PDA**: `["cpi_authority"]`, derived for the calling program
+- **Rust backend** (`backend/`): builds and submits initialize / deposit / withdraw transactions
+- **PostgreSQL**: transactions, vault metadata, and unused snapshot / audit tables
+
+Collateral stays in the vault ATA. Lock and unlock only change vault accounting.
+
+## Security model
+
+### Vault ownership
+
+Only the vault owner can withdraw available collateral.
+
+### CPI authorization
+
+`lock_collateral`, `unlock_collateral`, and `transfer_collateral` are meant to be called by another program.
+
+The vault checks all of these:
+
+- `caller_program` is executable
+- `caller_program` is in `authorized_programs`
+- `cpi_authority` is a signer
+- `cpi_authority` is the PDA `["cpi_authority"]` for `caller_program`
+
+Only that program can make the PDA a signer with `invoke_signed`. Passing an authorized program id is not enough, because anyone can include that account in a transaction.
+
+### Authority initialization
+
+`VaultAuthority` is a singleton. `initialize_vault_authority` can run once.
+
+The signer must be this program's BPF upgrade authority. The instruction checks the program account and its ProgramData account:
 
 ```
-.
-├── programs/
-│   └── collateral-vault/          # Anchor program (Solana smart contract)
-│       ├── Cargo.toml
-│       └── src/
-│           └── lib.rs
-├── backend/                       # Rust backend service
-│   ├── src/
-│   │   ├── main.rs
-│   │   ├── api.rs                 # REST API endpoints
-│   │   ├── vault_manager.rs       # Vault operations
-│   │   ├── balance_tracker.rs     # Balance monitoring
-│   │   └── ...
-│   └── migrations/
-│       └── 001_initial_schema.sql # Database schema
-├── tests/                         # Anchor program tests
-│   └── collateral-vault.ts
-├── ARCHITECTURE.md                # System architecture
-├── SMART_CONTRACT.md              # Smart contract documentation
-├── BACKEND_SERVICE.md             # Backend service docs
-├── SECURITY.md                    # Security analysis
-├── DEPLOYMENT.md                  # Deployment guide
-└── API.md                         # API documentation
+program.programdata_address() == program_data.key()
+program_data.upgrade_authority_address == Some(upgrade_authority.key())
 ```
 
-## Prerequisites
+An arbitrary first caller cannot initialize it. The upgrade authority is stored as `vault_authority.admin`. `admin` is a stored pubkey only. There is no instruction that uses it after init, and the allowlist cannot be changed.
 
-- **Rust** 1.75+ ([Install Rust](https://rustup.rs/))
-- **Anchor** 0.29+ ([Install Anchor](https://www.anchor-lang.com/docs/installation))
-- **Solana CLI** 1.18+ ([Install Solana](https://docs.solana.com/cli/install-solana-cli-tools))
-- **PostgreSQL** 14+ ([Install PostgreSQL](https://www.postgresql.org/download/))
-- **Node.js** 18+ and **Yarn** ([Install Node.js](https://nodejs.org/))
+Local tests set `[test] upgradeable = true` in `Anchor.toml` so the provider wallet is the upgrade authority.
 
-## Installation
+### Authorized program limit
 
-### 1. Clone and Setup
+`MAX_AUTHORIZED_PROGRAMS` is `10`. The same constant is used for account size and for init checks. Duplicate program ids are rejected.
+
+### Accounting
+
+Internal accounting:
+
+```
+total_balance == available_balance + locked_balance
+```
+
+Solvency:
+
+```
+vault_token_account.amount >= total_balance
+```
+
+Deposit, withdraw, lock, unlock, and transfer normally keep:
+
+```
+vault_token_account.amount == total_balance
+```
+
+Anyone can send SPL tokens directly to a vault token account. That surplus does not increase `total_balance` or `available_balance`, and it cannot be withdrawn through the vault. There is no sync instruction.
+
+`total_balance` is accounted collateral, not the raw token-account amount.
+
+### Locked collateral
+
+Locked collateral cannot be withdrawn. Withdraw uses `available_balance` only.
+
+### Checked arithmetic
+
+Balance updates use `checked_add` and `checked_sub`.
+
+Token transfers out of a vault are signed by the vault PDA:
+
+```
+seeds = ["vault", owner, bump]
+```
+
+## Known limitations
+
+- An authorized program can lock, unlock, or transfer any vault.
+- Those calls do not require the vault owner's signature.
+- Transfer does not require the destination owner.
+- The authorized program list cannot be changed after initialization.
+- An immutable deploy with no upgrade authority cannot initialize VaultAuthority.
+- Unsolicited SPL token surplus is not credited and has no recovery instruction.
+- `programs/test-caller` is for tests only. Do not allowlist it in production.
+
+## Program instructions
+
+- `initialize_vault_authority` — create the singleton VaultAuthority. Signer must be the program upgrade authority.
+- `initialize_vault` — create a user vault and its ATA.
+- `deposit` — move tokens from the user ATA into the vault ATA and credit available balance.
+- `withdraw` — owner-only. Move available tokens from the vault ATA to the user ATA.
+- `lock_collateral` — authorized CPI. Move amount from available to locked.
+- `unlock_collateral` — authorized CPI. Move amount from locked to available.
+- `transfer_collateral` — authorized CPI. Move available tokens and accounting from one vault to another.
+
+Amounts must be greater than zero.
+
+## Testing
+
+Program tests live in `tests/`. They cover:
+
+- Authority bootstrap
+- Unauthorized initialization
+- Duplicate and oversized authorized program lists
+- Authenticated CPI
+- Direct caller impersonation
+- Lock / unlock / transfer authorization
+- Locked collateral withdrawal protection
+- Zero amounts
+- Insufficient balances
+- Internal accounting invariant
+- SPL token reconciliation on normal flows
+- Unsolicited direct token transfers
+
+`programs/test-caller` exists only to test authenticated CPI calls. It signs `["cpi_authority"]` and forwards lock, unlock, and transfer.
+
+## Build and toolchain
+
+Pinned versions:
+
+- Anchor `0.32.1` (`Anchor.toml`)
+- `anchor-lang` / `anchor-spl` `0.32.1`
+- `@coral-xyz/anchor` `^0.32.1`
+- Rust toolchain: nightly (`rust-toolchain.toml`)
+
+Useful commands:
 
 ```bash
-cd solana-collateral-vault
-```
-
-### 2. Install Dependencies
-
-```bash
-# Install Node dependencies
 yarn install
 
-# Build Anchor program
+cargo fmt --check
+cargo clippy -p collateral-vault -p test-caller -- -D warnings
+cargo build -p collateral-vault -p test-caller
+
+anchor build
+anchor test --skip-build
+```
+
+If `anchor` on PATH is not 0.32.1, use `~/.avm/bin/anchor-0.32.1`.
+
+Local tests need `[test] upgradeable = true`. Without it, VaultAuthority init fails because ProgramData has no upgrade authority.
+
+## Setup
+
+Needs Rust, Solana CLI, Anchor 0.32.1, Node.js 18+, Yarn, and PostgreSQL if you run the backend.
+
+```bash
+yarn install
 anchor build
 ```
 
-### 3. Setup Database
+Database:
 
 ```bash
-# Create database
 createdb collateral_vault
-
-# Run migrations
 psql collateral_vault < backend/migrations/001_initial_schema.sql
 ```
 
-### 4. Configure Environment
-
-Create a `.env` file in the root directory:
+Environment (backend):
 
 ```bash
 DATABASE_URL=postgresql://localhost/collateral_vault
-RPC_URL=https://api.devnet.solana.com
+RPC_URL=http://localhost:8899
 PROGRAM_ID=8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9
-USDT_MINT=Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB
-PORT=3000
+USDT_MINT=<your mint>
+WALLET_PATH=~/.config/solana/id.json
 ```
 
-## Running the Project
+`USDT_MINT` should be your test mint on localnet. The backend binds `0.0.0.0:3000`.
 
-### 1. Start Local Validator (Optional - for local testing)
-
-```bash
-solana-test-validator
-```
-
-In another terminal, configure for localnet:
+Deploy:
 
 ```bash
-solana config set --url localhost
-```
-
-### 2. Deploy the Program
-
-```bash
-# Build and deploy
 anchor build
 anchor deploy
-
-# Or deploy to devnet
-anchor deploy --provider.cluster devnet
 ```
 
-### 3. Initialize Vault Authority
+After deploy, call `initialize_vault_authority` with the program upgrade authority. Pass the program account and its ProgramData account. The list of authorized programs is fixed at that point.
 
-After deployment, you need to initialize the vault authority. This can be done via the test suite or a separate script:
+## Backend / API
 
-```bash
-anchor test --skip-local-validator
-```
+Implemented routes:
 
-### 4. Start Backend Service
+| Method | Path | Notes |
+| --- | --- | --- |
+| POST | `/vault/initialize` | `{ "user": "<pubkey>" }` |
+| POST | `/vault/deposit` | `{ "user": "<pubkey>", "amount": <u64> }` |
+| POST | `/vault/withdraw` | `{ "user": "<pubkey>", "amount": <u64> }` |
+| GET | `/vault/balance/:user` | On-chain vault state |
+| GET | `/vault/transactions/:user` | Last 100 rows from PostgreSQL |
+| GET | `/vault/tvl` | Sum of recorded deposits minus withdrawals. `total_vaults` is always `0`. |
+
+The backend signs with the wallet in `WALLET_PATH` or `~/.config/solana/id.json`. For local use, `user` must be that wallet. The API does not accept user-signed transactions.
 
 ```bash
 cd backend
-cargo run --release
-```
-
-The server will start on `http://localhost:3000`
-
-## Complete Testing Guide (From Scratch)
-
-### Step 1: Start Local Solana Validator
-
-Open Terminal 1:
-```bash
-solana-test-validator
-```
-
-Keep this running. In a new terminal, configure Solana for localnet:
-```bash
-solana config set --url localhost
-```
-
-### Step 2: Create Test Token
-
-In the same terminal:
-```bash
-spl-token create-token --decimals 6
-```
-
-**Important**: Note the mint address output (e.g., `EM8thaMRrQ6cYK7zzVjzw9wwcL4RJcFn7QesJhr8UkY3`). You'll need this for the `USDT_MINT` environment variable.
-
-### Step 3: Setup Database
-
-```bash
-# Create database
-createdb collateral_vault
-
-# Run migrations
-psql collateral_vault < backend/migrations/001_initial_schema.sql
-```
-
-### Step 4: Build and Deploy Program
-
-```bash
-# Build the Anchor program
-anchor build
-
-# Deploy to local validator
-anchor deploy
-```
-
-### Step 5: Get Your Wallet Address
-
-```bash
-solana address
-```
-
-**Important**: For local testing, you must use the same wallet that's running the backend server (the default Solana wallet at `~/.config/solana/id.json`). This is because the backend signs transactions with this wallet. In production, users would sign their own transactions.
-
-### Step 6: Mint Tokens to Your Wallet
-
-```bash
-# Create associated token account (replace MINT_ADDRESS with your mint from Step 2)
-spl-token create-account <MINT_ADDRESS>
-
-# Mint tokens (10,000 tokens with 6 decimals = 10000000000 in smallest units)
-spl-token mint <MINT_ADDRESS> 10000
-```
-
-### Step 7: Start Backend Server
-
-Open Terminal 2:
-```bash
-cd backend
-
-# Set environment variables (replace MINT_ADDRESS with your mint from Step 2)
-export DATABASE_URL=postgresql://localhost/collateral_vault
-export RPC_URL=http://localhost:8899
-export PROGRAM_ID=8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9
-export USDT_MINT=<MINT_ADDRESS>
-
-# Start the server
 cargo run
 ```
 
-The server will start on `http://localhost:3000`. Keep this running.
+`./test-all-apis.sh` hits the routes above. Set `ADMIN_PUBKEY` to the backend wallet.
 
-### Step 8: Test All APIs
-
-Open Terminal 3. Replace `YOUR_PUBKEY` with your wallet address from Step 5:
+## Local program test flow
 
 ```bash
-# Set your pubkey
-YOUR_PUBKEY="<your_pubkey_from_step_5>"
-
-# 1. Initialize Vault
-curl -X POST http://localhost:3000/vault/initialize \
-  -H "Content-Type: application/json" \
-  -d "{\"user\": \"$YOUR_PUBKEY\"}"
-
-# 2. Get Vault Balance
-curl http://localhost:3000/vault/balance/$YOUR_PUBKEY
-
-# 3. Deposit Tokens (1000 tokens = 1000000000 with 6 decimals)
-curl -X POST http://localhost:3000/vault/deposit \
-  -H "Content-Type: application/json" \
-  -d "{\"user\": \"$YOUR_PUBKEY\", \"amount\": 1000000000}"
-
-# 4. Get Balance After Deposit
-curl http://localhost:3000/vault/balance/$YOUR_PUBKEY
-
-# 5. Withdraw Tokens (500 tokens = 500000000 with 6 decimals)
-curl -X POST http://localhost:3000/vault/withdraw \
-  -H "Content-Type: application/json" \
-  -d "{\"user\": \"$YOUR_PUBKEY\", \"amount\": 500000000}"
-
-# 6. Get Balance After Withdraw
-curl http://localhost:3000/vault/balance/$YOUR_PUBKEY
-
-# 7. Get Transaction History
-curl http://localhost:3000/vault/transactions/$YOUR_PUBKEY
-
-# 8. Get Total Value Locked (TVL)
-curl http://localhost:3000/vault/tvl
-```
-
-**Alternative**: You can use the provided test script:
-```bash
-# Set your pubkey as environment variable
-export ADMIN_PUBKEY="<your_pubkey>"
-
-# Run all API tests
-./test-all-apis.sh
-```
-
-### Expected Results
-
-- **Initialize**: Returns `{"success": true, "signature": "..."}`
-- **Balance**: Returns vault info with balances (initially 0, then updated after deposits/withdrawals)
-- **Deposit/Withdraw**: Returns transaction signature
-- **Transactions**: Returns array of all transactions for the vault
-- **TVL**: Returns total value locked across all vaults
-
-### Test the Anchor Program
-
-```bash
-# Run all tests
-anchor test
-
-# Run with local validator (skip starting validator)
-anchor test --skip-local-validator
-
-# Run specific test file
-anchor test tests/collateral-vault.ts
-```
-
-## Development
-
-### Build Commands
-
-```bash
-# Build Anchor program
+solana-test-validator
+solana config set --url localhost
 anchor build
-
-# Build backend
-cd backend
-cargo build
-
-# Build for release
-cargo build --release
+anchor test --skip-local-validator
 ```
 
-### Code Formatting
+Or let Anchor start a validator:
 
 ```bash
-# Format Rust code
-cargo fmt
-
-# Format TypeScript
-yarn format
+anchor test
 ```
-
-### Linting
-
-```bash
-# Lint Rust code
-cargo clippy
-
-# Lint TypeScript
-yarn lint
-```
-
-## Key Components
-
-### Anchor Program
-
-The Solana smart contract located in `programs/collateral-vault/src/lib.rs`:
-
-- `initialize_vault` - Create new vault
-- `deposit` - Deposit USDT into vault
-- `withdraw` - Withdraw USDT from vault
-- `lock_collateral` - Lock collateral for positions (CPI)
-- `unlock_collateral` - Unlock collateral (CPI)
-- `transfer_collateral` - Transfer between vaults (CPI)
-
-### Backend Service
-
-Rust service providing:
-
-- REST API endpoints for vault operations
-- WebSocket streams for real-time updates
-- Database integration for transaction history
-- Balance tracking and reconciliation
-- TVL monitoring
-
-**Backend File Structure:**
-
-- `main.rs` - Entry point, sets up database connection, Solana client, and starts the HTTP server
-- `api.rs` - Defines all REST API endpoints (initialize, deposit, withdraw, balance, transactions, TVL)
-- `vault_manager.rs` - Core vault operations: interacts with Solana blockchain, builds transactions, fetches on-chain data
-- `transaction_builder.rs` - Builds Solana instructions for initialize, deposit, and withdraw operations
-- `database.rs` - PostgreSQL operations: stores transactions, calculates TVL from transaction history
-- `vault_monitor.rs` - Monitors vaults and calculates TVL (used by TVL endpoint)
-- `models.rs` - Data structures for API requests/responses and database records
-- `error.rs` - Custom error types for the backend
-- `balance_tracker.rs` - Placeholder for future balance tracking and reconciliation features
-- `cpi_manager.rs` - Placeholder for future Cross-Program Invocation (CPI) management features
-- `websocket.rs` - Placeholder for future WebSocket real-time event streaming
-
-**Required Files for Testing:**
-- All files in `backend/src/` are needed to run the application
-- `backend/migrations/001_initial_schema.sql` is required for database setup
-
-## API Endpoints
-
-- `POST /vault/initialize` - Create new vault
-- `POST /vault/deposit` - Deposit collateral
-- `POST /vault/withdraw` - Withdraw collateral
-- `GET /vault/balance/:user` - Get vault balance
-- `GET /vault/transactions/:user` - Get transaction history
-- `GET /vault/tvl` - Get total value locked
-
-See [API.md](./API.md) for detailed API documentation.
-
-## Important Notes
-
-### Local Testing Limitation
-
-For local testing, the user pubkey in API requests must match the admin wallet (the wallet used to run the backend server, located at `~/.config/solana/id.json`). This is because the backend signs transactions with this wallet. In production, users would sign their own transactions using their wallets.
-
-### Environment Variables
-
-The backend requires these environment variables:
-- `DATABASE_URL` - PostgreSQL connection string (default: `postgresql://localhost/collateral_vault`)
-- `RPC_URL` - Solana RPC endpoint (default: `http://localhost:8899` for local, or `https://api.devnet.solana.com` for devnet)
-- `PROGRAM_ID` - Your deployed program ID (default: `8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9`)
-- `USDT_MINT` - SPL token mint address for collateral (required - no default for local testing)
-
-### No Hardcoded Values
-
-The system does not use hardcoded wallet addresses or pubkeys. All values are:
-- Loaded from environment variables
-- Read from the default Solana wallet (`~/.config/solana/id.json`)
-- Provided by the user via API requests
-
-## Documentation
-
-- [ARCHITECTURE.md](./ARCHITECTURE.md) - System architecture and design
-- [SMART_CONTRACT.md](./SMART_CONTRACT.md) - Smart contract specifications
-- [SPL_TOKEN_INTEGRATION.md](./SPL_TOKEN_INTEGRATION.md) - SPL Token integration guide
-- [BACKEND_SERVICE.md](./BACKEND_SERVICE.md) - Backend service documentation
-- [SECURITY.md](./SECURITY.md) - Security analysis and best practices
-- [DEPLOYMENT.md](./DEPLOYMENT.md) - Production deployment guide
-- [API.md](./API.md) - REST API documentation
-
