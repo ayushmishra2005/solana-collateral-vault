@@ -33,7 +33,6 @@ describe("collateral-vault", () => {
   let vaultAuthorityBump: number;
 
   before(async () => {
-    // Airdrop SOL to user and admin
     const userAirdrop = await provider.connection.requestAirdrop(
       user.publicKey,
       2 * anchor.web3.LAMPORTS_PER_SOL
@@ -46,7 +45,6 @@ describe("collateral-vault", () => {
     );
     await provider.connection.confirmTransaction(adminAirdrop);
 
-    // Create test mint
     mint = Keypair.generate();
     mintPubkey = mint.publicKey;
     
@@ -75,7 +73,6 @@ describe("collateral-vault", () => {
     const sig = await provider.connection.sendRawTransaction(createMintTx.serialize());
     await provider.connection.confirmTransaction(sig);
 
-    // Initialize vault authority
     [vaultAuthority, vaultAuthorityBump] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault_authority")],
       program.programId
@@ -83,21 +80,25 @@ describe("collateral-vault", () => {
   });
 
   it("Initializes vault authority", async () => {
-    const authorizedPrograms = [program.programId]; // For testing
+    const testCaller = anchor.workspace.TestCaller as Program<any>;
+    const authorizedPrograms = [testCaller.programId];
 
-    // Check if vault authority already exists
     try {
       const existing = await program.account.vaultAuthority.fetch(vaultAuthority);
       console.log("Vault authority already initialized:", vaultAuthority.toString());
-      return; // Skip if already initialized
+      return;
     } catch (err) {
-      // Account doesn't exist, proceed with initialization
     }
 
     const tx = await program.methods
       .initializeVaultAuthority(authorizedPrograms)
       .accounts({
-        admin: admin.publicKey,
+        upgradeAuthority: admin.publicKey,
+        program: program.programId,
+        programData: PublicKey.findProgramAddressSync(
+          [program.programId.toBuffer()],
+          new PublicKey("BPFLoaderUpgradeab1e11111111111111111111111")
+        )[0],
         vaultAuthority: vaultAuthority,
         systemProgram: SystemProgram.programId,
       })
@@ -144,8 +145,7 @@ describe("collateral-vault", () => {
 
       const vaultAccount = await program.account.collateralVault.fetch(vaultPda);
       console.log("Vault account:", vaultAccount);
-      
-      // Verify vault was initialized correctly
+
       const chai = require("chai");
       chai.assert.equal(vaultAccount.owner.toString(), user.publicKey.toString(), "Owner should match user");
       chai.assert.equal(vaultAccount.totalBalance.toNumber(), 0, "Initial balance should be 0");
@@ -179,7 +179,6 @@ describe("collateral-vault", () => {
       program.programId
     );
 
-    // Create user token account if it doesn't exist
     const userTokenAccountInfo = await provider.connection.getAccountInfo(userTokenAccount);
     if (!userTokenAccountInfo) {
       const createATA = new Transaction().add(
@@ -193,7 +192,6 @@ describe("collateral-vault", () => {
       await provider.sendAndConfirm(createATA, [user]);
     }
 
-    // Mint tokens to user
     const amount = new anchor.BN(1000000); // 1 USDT (6 decimals)
     const mintTx = new Transaction().add(
       createMintToInstruction(
@@ -219,7 +217,7 @@ describe("collateral-vault", () => {
           userTokenAccount: userTokenAccount,
           vaultTokenAccount: vaultTokenAccount,
           mint: mintPubkey,
-          vaultAuthorityPda: vaultAuthorityPda,
+          vaultAuthority: vaultAuthorityPda,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .signers([user])
@@ -229,8 +227,7 @@ describe("collateral-vault", () => {
 
       const vaultAccount = await program.account.collateralVault.fetch(vaultPda);
       console.log("Vault after deposit:", vaultAccount);
-      
-      // Verify deposit was successful
+
       const chai = require("chai");
       chai.assert.equal(vaultAccount.totalBalance.toNumber(), 1000000, "Total balance should be 1000000");
       chai.assert.equal(vaultAccount.availableBalance.toNumber(), 1000000, "Available balance should be 1000000");
@@ -285,8 +282,7 @@ describe("collateral-vault", () => {
 
       const vaultAccount = await program.account.collateralVault.fetch(vaultPda);
       console.log("Vault after withdraw:", vaultAccount);
-      
-      // Verify withdraw was successful
+
       const chai = require("chai");
       chai.assert.equal(vaultAccount.totalBalance.toNumber(), 500000, "Total balance should be 500000 after withdraw");
       chai.assert.equal(vaultAccount.availableBalance.toNumber(), 500000, "Available balance should be 500000");

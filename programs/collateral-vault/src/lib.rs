@@ -1,6 +1,6 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_spl::associated_token::AssociatedToken;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 declare_id!("8vjbjPhoD2rav71J8mgbVxcYdbbqST78y2bzMPRqoGr9");
 
@@ -34,7 +34,6 @@ pub mod collateral_vault {
     pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
 
-        // Transfer USDT from user to vault using CPI
         token::transfer(
             CpiContext::new(
                 ctx.accounts.token_program.to_account_info(),
@@ -47,7 +46,6 @@ pub mod collateral_vault {
             amount,
         )?;
 
-        // Update vault state
         let vault = &mut ctx.accounts.vault;
         vault.total_balance = vault
             .total_balance
@@ -61,6 +59,7 @@ pub mod collateral_vault {
             .total_deposited
             .checked_add(amount)
             .ok_or(ErrorCode::Overflow)?;
+        vault.assert_balances()?;
 
         let clock = Clock::get()?;
         emit!(DepositEvent {
@@ -83,12 +82,7 @@ pub mod collateral_vault {
             ErrorCode::InsufficientAvailableBalance
         );
 
-        // Transfer USDT from vault to user using CPI
-        let seeds = &[
-            b"vault",
-            vault.owner.as_ref(),
-            &[vault.bump],
-        ];
+        let seeds = &[b"vault", vault.owner.as_ref(), &[vault.bump]];
         let signer = &[&seeds[..]];
 
         token::transfer(
@@ -104,7 +98,6 @@ pub mod collateral_vault {
             amount,
         )?;
 
-        // Update vault state
         vault.total_balance = vault
             .total_balance
             .checked_sub(amount)
@@ -117,6 +110,7 @@ pub mod collateral_vault {
             .total_withdrawn
             .checked_add(amount)
             .ok_or(ErrorCode::Overflow)?;
+        vault.assert_balances()?;
 
         let clock = Clock::get()?;
         emit!(WithdrawEvent {
@@ -139,13 +133,6 @@ pub mod collateral_vault {
             ErrorCode::InsufficientAvailableBalance
         );
 
-        // Verify caller is authorized program
-        let vault_authority = &ctx.accounts.vault_authority;
-        require!(
-            vault_authority.authorized_programs.contains(&ctx.accounts.caller_program.key()),
-            ErrorCode::UnauthorizedProgram
-        );
-
         vault.locked_balance = vault
             .locked_balance
             .checked_add(amount)
@@ -154,6 +141,7 @@ pub mod collateral_vault {
             .available_balance
             .checked_sub(amount)
             .ok_or(ErrorCode::Underflow)?;
+        vault.assert_balances()?;
 
         let clock = Clock::get()?;
         emit!(LockEvent {
@@ -176,13 +164,6 @@ pub mod collateral_vault {
             ErrorCode::InsufficientLockedBalance
         );
 
-        // Verify caller is authorized program
-        let vault_authority = &ctx.accounts.vault_authority;
-        require!(
-            vault_authority.authorized_programs.contains(&ctx.accounts.caller_program.key()),
-            ErrorCode::UnauthorizedProgram
-        );
-
         vault.locked_balance = vault
             .locked_balance
             .checked_sub(amount)
@@ -191,6 +172,7 @@ pub mod collateral_vault {
             .available_balance
             .checked_add(amount)
             .ok_or(ErrorCode::Overflow)?;
+        vault.assert_balances()?;
 
         let clock = Clock::get()?;
         emit!(UnlockEvent {
@@ -204,10 +186,7 @@ pub mod collateral_vault {
         Ok(())
     }
 
-    pub fn transfer_collateral(
-        ctx: Context<TransferCollateral>,
-        amount: u64,
-    ) -> Result<()> {
+    pub fn transfer_collateral(ctx: Context<TransferCollateral>, amount: u64) -> Result<()> {
         require!(amount > 0, ErrorCode::InvalidAmount);
 
         let from_vault = &mut ctx.accounts.from_vault;
@@ -218,19 +197,7 @@ pub mod collateral_vault {
             ErrorCode::InsufficientAvailableBalance
         );
 
-        // Verify caller is authorized program
-        let vault_authority = &ctx.accounts.vault_authority;
-        require!(
-            vault_authority.authorized_programs.contains(&ctx.accounts.caller_program.key()),
-            ErrorCode::UnauthorizedProgram
-        );
-
-        // Transfer tokens between vaults
-        let seeds = &[
-            b"vault",
-            from_vault.owner.as_ref(),
-            &[from_vault.bump],
-        ];
+        let seeds = &[b"vault", from_vault.owner.as_ref(), &[from_vault.bump]];
         let signer = &[&seeds[..]];
 
         token::transfer(
@@ -246,7 +213,6 @@ pub mod collateral_vault {
             amount,
         )?;
 
-        // Update from_vault state
         from_vault.total_balance = from_vault
             .total_balance
             .checked_sub(amount)
@@ -256,7 +222,6 @@ pub mod collateral_vault {
             .checked_sub(amount)
             .ok_or(ErrorCode::Underflow)?;
 
-        // Update to_vault state
         to_vault.total_balance = to_vault
             .total_balance
             .checked_add(amount)
@@ -265,6 +230,8 @@ pub mod collateral_vault {
             .available_balance
             .checked_add(amount)
             .ok_or(ErrorCode::Overflow)?;
+        from_vault.assert_balances()?;
+        to_vault.assert_balances()?;
 
         let clock = Clock::get()?;
         emit!(TransferEvent {
@@ -283,7 +250,17 @@ pub mod collateral_vault {
         ctx: Context<InitializeVaultAuthority>,
         authorized_programs: Vec<Pubkey>,
     ) -> Result<()> {
+        require!(
+            authorized_programs.len() <= VaultAuthority::MAX_AUTHORIZED_PROGRAMS,
+            ErrorCode::TooManyPrograms
+        );
+        require!(
+            !has_duplicate_program(&authorized_programs),
+            ErrorCode::DuplicateProgram
+        );
+
         let vault_authority = &mut ctx.accounts.vault_authority;
+        vault_authority.admin = ctx.accounts.upgrade_authority.key();
         vault_authority.authorized_programs = authorized_programs;
         vault_authority.bump = ctx.bumps.vault_authority;
 
@@ -306,6 +283,7 @@ pub struct CollateralVault {
 
 #[account]
 pub struct VaultAuthority {
+    pub admin: Pubkey,
     pub authorized_programs: Vec<Pubkey>,
     pub bump: u8,
 }
@@ -438,12 +416,22 @@ pub struct LockCollateral<'info> {
 
     #[account(
         seeds = [b"vault_authority"],
-        bump = vault_authority.bump
+        bump = vault_authority.bump,
+        constraint = vault_authority.authorized_programs.contains(&caller_program.key()) @ ErrorCode::UnauthorizedProgram
     )]
     pub vault_authority: Account<'info, VaultAuthority>,
 
-    /// CHECK: Verified by checking authorized_programs
+    /// CHECK: must be an executable program in authorized_programs
+    #[account(executable)]
     pub caller_program: AccountInfo<'info>,
+
+    // Only caller_program can sign this PDA.
+    #[account(
+        seeds = [b"cpi_authority"],
+        bump,
+        seeds::program = caller_program.key()
+    )]
+    pub cpi_authority: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -457,12 +445,22 @@ pub struct UnlockCollateral<'info> {
 
     #[account(
         seeds = [b"vault_authority"],
-        bump = vault_authority.bump
+        bump = vault_authority.bump,
+        constraint = vault_authority.authorized_programs.contains(&caller_program.key()) @ ErrorCode::UnauthorizedProgram
     )]
     pub vault_authority: Account<'info, VaultAuthority>,
 
-    /// CHECK: Verified by checking authorized_programs
+    /// CHECK: must be an executable program in authorized_programs
+    #[account(executable)]
     pub caller_program: AccountInfo<'info>,
+
+    // Only caller_program can sign this PDA.
+    #[account(
+        seeds = [b"cpi_authority"],
+        bump,
+        seeds::program = caller_program.key()
+    )]
+    pub cpi_authority: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -513,12 +511,22 @@ pub struct TransferCollateral<'info> {
 
     #[account(
         seeds = [b"vault_authority"],
-        bump = vault_authority.bump
+        bump = vault_authority.bump,
+        constraint = vault_authority.authorized_programs.contains(&caller_program.key()) @ ErrorCode::UnauthorizedProgram
     )]
     pub vault_authority: Account<'info, VaultAuthority>,
 
-    /// CHECK: Verified by checking authorized_programs
+    /// CHECK: must be an executable program in authorized_programs
+    #[account(executable)]
     pub caller_program: AccountInfo<'info>,
+
+    // Only caller_program can sign this PDA.
+    #[account(
+        seeds = [b"cpi_authority"],
+        bump,
+        seeds::program = caller_program.key()
+    )]
+    pub cpi_authority: Signer<'info>,
 
     pub token_program: Program<'info, Token>,
 }
@@ -526,11 +534,20 @@ pub struct TransferCollateral<'info> {
 #[derive(Accounts)]
 pub struct InitializeVaultAuthority<'info> {
     #[account(mut)]
-    pub admin: Signer<'info>,
+    pub upgrade_authority: Signer<'info>,
+
+    #[account(constraint = program.programdata_address()? == Some(program_data.key()))]
+    pub program: Program<'info, crate::program::CollateralVault>,
+
+    #[account(
+        constraint = program_data.upgrade_authority_address == Some(upgrade_authority.key())
+            @ ErrorCode::UnauthorizedUpgradeAuthority
+    )]
+    pub program_data: Account<'info, ProgramData>,
 
     #[account(
         init,
-        payer = admin,
+        payer = upgrade_authority,
         space = 8 + VaultAuthority::LEN,
         seeds = [b"vault_authority"],
         bump
@@ -542,10 +559,29 @@ pub struct InitializeVaultAuthority<'info> {
 
 impl CollateralVault {
     pub const LEN: usize = 32 + 32 + 8 + 8 + 8 + 8 + 8 + 8 + 1;
+
+    fn assert_balances(&self) -> Result<()> {
+        let split = self
+            .available_balance
+            .checked_add(self.locked_balance)
+            .ok_or(ErrorCode::Overflow)?;
+        require!(split == self.total_balance, ErrorCode::BalanceMismatch);
+        Ok(())
+    }
 }
 
 impl VaultAuthority {
-    pub const LEN: usize = 4 + (32 * 10) + 1; // Vec<Pubkey> with max 10 programs + bump
+    pub const MAX_AUTHORIZED_PROGRAMS: usize = 10;
+    pub const LEN: usize = 32 + 4 + (32 * Self::MAX_AUTHORIZED_PROGRAMS) + 1;
+}
+
+fn has_duplicate_program(programs: &[Pubkey]) -> bool {
+    for (i, program) in programs.iter().enumerate() {
+        if programs[i + 1..].contains(program) {
+            return true;
+        }
+    }
+    false
 }
 
 #[event]
@@ -617,4 +653,12 @@ pub enum ErrorCode {
     Overflow,
     #[msg("Integer underflow")]
     Underflow,
+    #[msg("Balance mismatch")]
+    BalanceMismatch,
+    #[msg("Unauthorized upgrade authority")]
+    UnauthorizedUpgradeAuthority,
+    #[msg("Too many programs")]
+    TooManyPrograms,
+    #[msg("Duplicate program")]
+    DuplicateProgram,
 }

@@ -1,0 +1,27 @@
+[package]
+name = "test-caller"
+version = "0.1.0"
+description = "Test program that CPIs into the collateral vault"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "test_caller"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "collateral-vault/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = "0.32.1"
+collateral-vault = { path = "../collateral-vault", features = ["cpi"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
